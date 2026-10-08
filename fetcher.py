@@ -174,6 +174,12 @@ def discover_sources() -> int:
 
         time.sleep(1)  # Уважаем rate limits
 
+    if added == 0:
+        print("[Scout] Ничего не найдено, добавляю базовый агрегатор olimpiada.ru как fallback.")
+        sid = save_source("https://olimpiada.ru")
+        if sid:
+            added += 1
+
     print(f"\n=== РАЗВЕДКА ЗАВЕРШЕНА. Добавлено источников: {added} ===")
     return added
 

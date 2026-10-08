@@ -72,7 +72,7 @@ with tab2:
     if "is_fetching" not in st.session_state:
         st.session_state.is_fetching = False
         
-    btn_disabled = st.session_state.is_fetching
+    btn_disabled = bool(st.session_state.is_fetching)
     
     col1, col2, col3 = st.columns(3)
     

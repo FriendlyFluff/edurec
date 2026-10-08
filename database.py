@@ -6,9 +6,10 @@ database.py — Двойной адаптер: Supabase (PostgreSQL) в обла
     → используется Supabase PostgreSQL (production / облако).
   - Иначе → используется локальный SQLite (разработка / отладка).
 
-Публичный интерфейс НЕ меняется:
-  init_db(), save_user(), get_user(), list_users(),
-  save_event(), get_events_by_directions(), get_all_events()
+Публичный интерфейс:
+  init_db(),
+  save_event(), get_events_by_directions(), get_all_events(), get_last_updated(),
+  get_active_sources(), save_source(), mark_source_dead(), update_source_audited()
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def init_db():
     """
     Создаёт таблицы, если их нет.
     SQLite: через executescript.
-    Supabase: таблицы создаются через дашборд Supabase один раз вручную.
+    Supabase: таблицы создаются через дашборд один раз вручную (см. docs/supabase_schema.sql).
               Эта функция только проверяет доступность соединения.
     """
     if USE_SUPABASE:
@@ -88,81 +89,89 @@ def init_db():
     else:
         with _sqlite_conn() as conn:
             conn.executescript("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                    role                TEXT    NOT NULL,
-                    base_points         INTEGER NOT NULL DEFAULT 0,
-                    preferred_directions TEXT   NOT NULL DEFAULT ''
-                );
-
                 CREATE TABLE IF NOT EXISTS events (
                     event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
                     title         TEXT    NOT NULL,
                     url           TEXT    UNIQUE,
                     event_date    TEXT,
                     direction     TEXT,
+                    target_audience TEXT,
                     profit_points INTEGER NOT NULL DEFAULT 5,
                     description   TEXT,
                     created_at    TEXT    DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS trusted_sources (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url          TEXT    NOT NULL UNIQUE,
+                    status       TEXT    NOT NULL DEFAULT 'active',
+                    last_audited TEXT
                 );
             """)
         print(f"[DB] SQLite: {DB_PATH}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Users
+# Trusted Sources
 # ══════════════════════════════════════════════════════════════════════════════
 
-def save_user(role: str, base_points: int, preferred_directions: str,
-              user_id: int | None = None) -> int:
+def get_active_sources() -> list[dict]:
+    """Возвращает все активные Trusted Sources."""
     if USE_SUPABASE:
-        supa = _supa()
-        if user_id:
-            supa.table("users").update({
-                "role": role,
-                "base_points": base_points,
-                "preferred_directions": preferred_directions,
-            }).eq("user_id", user_id).execute()
-            return user_id
-        res = supa.table("users").insert({
-            "role": role,
-            "base_points": base_points,
-            "preferred_directions": preferred_directions,
-        }).execute()
-        return res.data[0]["user_id"]
+        res = _supa().table("trusted_sources").select("*").eq("status", "active").execute()
+        return res.data or []
     else:
         with _sqlite_conn() as conn:
-            if user_id:
-                conn.execute(
-                    "UPDATE users SET role=?, base_points=?, preferred_directions=? WHERE user_id=?",
-                    (role, base_points, preferred_directions, user_id),
-                )
-                return user_id
+            rows = conn.execute(
+                "SELECT * FROM trusted_sources WHERE status='active'"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_source(url: str) -> int | None:
+    """Сохраняет новый Trusted Source со статусом 'active'. Пропускает дубликаты."""
+    if USE_SUPABASE:
+        supa = _supa()
+        existing = supa.table("trusted_sources").select("id").eq("url", url).execute()
+        if existing.data:
+            return existing.data[0]["id"]
+        res = supa.table("trusted_sources").insert({"url": url, "status": "active"}).execute()
+        return res.data[0]["id"] if res.data else None
+    else:
+        with _sqlite_conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM trusted_sources WHERE url=?", (url,)
+            ).fetchone()
+            if existing:
+                return existing["id"]
             cur = conn.execute(
-                "INSERT INTO users (role, base_points, preferred_directions) VALUES (?,?,?)",
-                (role, base_points, preferred_directions),
+                "INSERT INTO trusted_sources (url, status) VALUES (?, 'active')", (url,)
             )
             return cur.lastrowid
 
 
-def get_user(user_id: int) -> dict | None:
+def mark_source_dead(url: str) -> None:
+    """Помечает Trusted Source как мертвый (dead). Вызывается Аудитором."""
     if USE_SUPABASE:
-        res = _supa().table("users").select("*").eq("user_id", user_id).execute()
-        return res.data[0] if res.data else None
+        _supa().table("trusted_sources").update({"status": "dead"}).eq("url", url).execute()
     else:
         with _sqlite_conn() as conn:
-            row = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-        return dict(row) if row else None
+            conn.execute("UPDATE trusted_sources SET status='dead' WHERE url=?", (url,))
 
 
-def list_users() -> list[dict]:
+def update_source_audited(url: str) -> None:
+    """Обновляет timestamp последней проверки Trusted Source."""
     if USE_SUPABASE:
-        res = _supa().table("users").select("*").execute()
-        return res.data or []
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        _supa().table("trusted_sources").update({"last_audited": ts}).eq("url", url).execute()
     else:
         with _sqlite_conn() as conn:
-            rows = conn.execute("SELECT * FROM users").fetchall()
-        return [dict(r) for r in rows]
+            conn.execute(
+                "UPDATE trusted_sources SET last_audited=datetime('now') WHERE url=?", (url,)
+            )
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -170,7 +179,8 @@ def list_users() -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def save_event(title: str, url: str, event_date: str,
-               direction: str, profit_points: int, description: str) -> int:
+               direction: str, profit_points: int, description: str,
+               target_audience: str = "") -> int:
     """Сохраняет мероприятие. Пропускает дубликаты по URL."""
     if USE_SUPABASE:
         supa = _supa()
@@ -183,6 +193,7 @@ def save_event(title: str, url: str, event_date: str,
             "url": url,
             "event_date": event_date or None,
             "direction": direction,
+            "target_audience": target_audience or None,
             "profit_points": profit_points,
             "description": description,
         }).execute()
@@ -195,11 +206,12 @@ def save_event(title: str, url: str, event_date: str,
             if existing:
                 return existing["event_id"]
             cur = conn.execute(
-                "INSERT INTO events (title, url, event_date, direction, profit_points, description) "
-                "VALUES (?,?,?,?,?,?)",
-                (title, url, event_date, direction, profit_points, description),
+                "INSERT INTO events (title, url, event_date, direction, target_audience, profit_points, description) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (title, url, event_date, direction, target_audience, profit_points, description),
             )
             return cur.lastrowid
+
 
 
 def get_events_by_directions(directions: list[str], today: str) -> list[dict]:

@@ -11,7 +11,7 @@ import numpy as np
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
-from database import get_events_by_directions, get_user
+from database import get_events_by_directions
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
 GROQ_MODEL = "llama3-70b-8192"
@@ -56,7 +56,7 @@ def build_faiss_index(events: list[dict]):
     index.add(vectors)
     return index, texts
 
-def get_recommendations(user_id: int, today: str) -> dict:
+def get_recommendations(role: str, directions: list[str], today: str) -> dict:
     """
     Возвращает словарь:
     {
@@ -64,12 +64,10 @@ def get_recommendations(user_id: int, today: str) -> dict:
        "retrieved_context": ["сырой текст из БД", ...]
     }
     """
-    user = get_user(user_id)
-    if not user:
-        return {"answer": "Пользователь не найден.", "retrieved_context": []}
+    if not directions:
+        return {"answer": "Не указаны теги для поиска.", "retrieved_context": []}
 
-    dirs = [d.strip() for d in user["preferred_directions"].split(",") if d.strip()]
-    events = get_events_by_directions(dirs, today)
+    events = get_events_by_directions(directions, today)
     
     if not events:
         return {"answer": "Подходящих мероприятий не найдено в базе.", "retrieved_context": []}
@@ -79,7 +77,7 @@ def get_recommendations(user_id: int, today: str) -> dict:
     if not index:
         return {"answer": "Ошибка построения индекса.", "retrieved_context": []}
         
-    query = f"Лучшие мероприятия для профиля: {user['role']}, интересы: {user['preferred_directions']}"
+    query = f"Лучшие мероприятия для профиля: {role}, интересы: {', '.join(directions)}"
     q_vec = get_embedder().encode([query], convert_to_numpy=True)
     
     k = min(3, len(events))

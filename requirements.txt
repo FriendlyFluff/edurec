@@ -4,5 +4,6 @@ faiss-cpu
 openai
 numpy
 supabase
-duckduckgo-search
+tavily-python
 groq
+requests

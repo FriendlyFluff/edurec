@@ -41,6 +41,36 @@ def _get_groq_key() -> str:
         pass
     return os.getenv("GROQ_API_KEY", "")
 
+_cached_rag_model = None
+
+def get_best_rag_model(client: OpenAI) -> str:
+    global _cached_rag_model
+    if _cached_rag_model:
+        return _cached_rag_model
+
+    candidates = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768",
+    ]
+    try:
+        available = [m.id for m in client.models.list().data]
+        for c in candidates:
+            if c in available:
+                _cached_rag_model = c
+                return _cached_rag_model
+        for mid in available:
+            if "whisper" not in mid and "guard" not in mid:
+                _cached_rag_model = mid
+                return _cached_rag_model
+    except Exception:
+        pass
+    _cached_rag_model = "llama-3.1-8b-instant"
+    return _cached_rag_model
+
+
 def get_groq_client() -> OpenAI:
     key = _get_groq_key()
     if not key:
@@ -142,9 +172,10 @@ def get_recommendations(role: str, directions: list[str], today: str) -> dict:
     )
     
     client = get_groq_client()
+    rag_model = get_best_rag_model(client)
     try:
         resp = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=rag_model,
             messages=[{"role": "system", "content": system_prompt}],
             temperature=0.3
         )

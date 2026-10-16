@@ -127,6 +127,51 @@ def _groq_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
 
 
+_cached_model = None
+
+def get_best_groq_model(client: OpenAI, log: Callable[[str], None] = _noop) -> str:
+    """Динамически запрашивает у Groq список реально доступных моделей для вашего ключа
+
+    и выбирает самую лучшую работающую модель, предотвращая любые 404/400 ошибки.
+    """
+    global _cached_model
+    if _cached_model:
+        return _cached_model
+
+    preferred_candidates = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+    ]
+
+    try:
+        models_data = client.models.list()
+        available_ids = [m.id for m in models_data.data]
+        log(f"  🔍 Доступные модели Groq: {', '.join(available_ids[:5])}...")
+
+        for cand in preferred_candidates:
+            if cand in available_ids:
+                _cached_model = cand
+                log(f"  🎯 Выбрана оптимальная модель: {_cached_model}")
+                return _cached_model
+
+        # Если ни один кандидат не совпал, берем первую доступную не-whisper
+        for mid in available_ids:
+            if "whisper" not in mid and "guard" not in mid:
+                _cached_model = mid
+                log(f"  🎯 Выбрана модель по умолчанию: {_cached_model}")
+                return _cached_model
+    except Exception as e:
+        log(f"  ⚠️ Не удалось запросить список моделей: {e}. Используем fallback.")
+
+    _cached_model = "llama-3.1-8b-instant"
+    return _cached_model
+
+
 def _tavily_key() -> str:
     key = _get_secret("TAVILY_API_KEY")
     if not key:
@@ -422,10 +467,11 @@ def _extract_events_via_llm(source_url: str, content: str, client: OpenAI,
     """
     # Ограничиваем текст: 6000 символов достаточно для анонсов страницы
     trimmed_content = content[:6000]
+    model_name = get_best_groq_model(client, log)
 
     try:
         resp = client.chat.completions.create(
-            model=GROQ_MODEL_SMART,
+            model=model_name,
             messages=[
                 {"role": "system", "content": _HARVEST_PROMPT},
                 {"role": "user", "content": f"URL источника: {source_url}\n\nТекст страницы:\n{trimmed_content}"},

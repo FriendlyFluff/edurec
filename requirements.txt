@@ -7,3 +7,4 @@ supabase
 tavily-python
 groq
 requests
+pandas

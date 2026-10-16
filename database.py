@@ -8,7 +8,7 @@ database.py — Двойной адаптер: Supabase (PostgreSQL) в обла
 
 Публичный интерфейс:
   init_db(),
-  save_event(), get_events_by_directions(), get_all_events(), get_last_updated(),
+  save_event(), get_all_events_for_rag(), get_all_events(), get_last_updated(),
   get_active_sources(), save_source(), mark_source_dead(), update_source_audited()
 """
 
@@ -90,15 +90,17 @@ def init_db():
         with _sqlite_conn() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS events (
-                    event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title         TEXT    NOT NULL,
-                    url           TEXT    UNIQUE,
-                    event_date    TEXT,
-                    direction     TEXT,
+                    event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title           TEXT    NOT NULL,
+                    url             TEXT    UNIQUE,
+                    event_date      TEXT,
+                    direction       TEXT,
+                    category        TEXT,
                     target_audience TEXT,
-                    profit_points INTEGER NOT NULL DEFAULT 5,
-                    description   TEXT,
-                    created_at    TEXT    DEFAULT (datetime('now'))
+                    profit_points   INTEGER NOT NULL DEFAULT 5,
+                    description     TEXT,
+                    is_incomplete   INTEGER NOT NULL DEFAULT 0,
+                    created_at      TEXT    DEFAULT (datetime('now'))
                 );
 
                 CREATE TABLE IF NOT EXISTS trusted_sources (
@@ -109,6 +111,7 @@ def init_db():
                 );
             """)
         print(f"[DB] SQLite: {DB_PATH}")
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -180,8 +183,14 @@ def update_source_audited(url: str) -> None:
 
 def save_event(title: str, url: str, event_date: str,
                direction: str, profit_points: int, description: str,
-               target_audience: str = "") -> int:
-    """Сохраняет мероприятие. Пропускает дубликаты по URL."""
+               target_audience: str = "",
+               category: str = "") -> int:
+    """Сохраняет мероприятие. Пропускает дубликаты по URL.
+
+    Флаг is_incomplete устанавливается автоматически, если event_date пустая или None.
+    """
+    is_incomplete = not bool(event_date and event_date.strip())
+
     if USE_SUPABASE:
         supa = _supa()
         # Проверяем дубликат
@@ -193,9 +202,11 @@ def save_event(title: str, url: str, event_date: str,
             "url": url,
             "event_date": event_date or None,
             "direction": direction,
+            "category": category or None,
             "target_audience": target_audience or None,
             "profit_points": profit_points,
             "description": description,
+            "is_incomplete": is_incomplete,
         }).execute()
         return res.data[0]["event_id"]
     else:
@@ -206,40 +217,32 @@ def save_event(title: str, url: str, event_date: str,
             if existing:
                 return existing["event_id"]
             cur = conn.execute(
-                "INSERT INTO events (title, url, event_date, direction, target_audience, profit_points, description) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (title, url, event_date, direction, target_audience, profit_points, description),
+                "INSERT INTO events "
+                "(title, url, event_date, direction, category, target_audience, profit_points, description, is_incomplete) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (title, url, event_date, direction, category, target_audience,
+                 profit_points, description, int(is_incomplete)),
             )
             return cur.lastrowid
 
 
 
-def get_events_by_directions(directions: list[str], today: str) -> list[dict]:
-    """Возвращает актуальные мероприятия по направлениям."""
-    if not directions:
-        return []
 
+
+def get_all_events_for_rag() -> list[dict]:
+    """Возвращает ВСЕ мероприятия из БД для векторного RAG-поиска.
+
+    Намеренно НЕ фильтрует по direction или дате: FAISS-индекс сам найдет
+    наиболее семантически близкие результаты без жестких SQL-ограничений.
+    """
     if USE_SUPABASE:
-        supa = _supa()
-        res = (
-            supa.table("events")
-            .select("*")
-            .in_("direction", directions)
-            .or_(f"event_date.is.null,event_date.eq.,event_date.gte.{today}")
-            .order("profit_points", desc=True)
-            .execute()
-        )
+        res = _supa().table("events").select("*").order("profit_points", desc=True).execute()
         return res.data or []
     else:
-        placeholders = ",".join("?" * len(directions))
-        query = f"""
-            SELECT * FROM events
-            WHERE direction IN ({placeholders})
-              AND (event_date IS NULL OR event_date = '' OR event_date >= ?)
-            ORDER BY profit_points DESC
-        """
         with _sqlite_conn() as conn:
-            rows = conn.execute(query, (*directions, today)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM events ORDER BY profit_points DESC"
+            ).fetchall()
         return [dict(r) for r in rows]
 
 

@@ -1,6 +1,13 @@
 """
 rag_engine.py — Облачный RAG.
 FAISS + SentenceTransformers + Groq API (LLaMA-3-70B).
+
+Архитектурное решение (ADR-0003):
+  - get_recommendations() берет ВСЕ мероприятия из БД без SQL-фильтров.
+  - Поиск релевантных мероприятий ведется исключительно через векторную
+    семантическую близость (FAISS). Это устраняет проблему "пустой выдачи".
+  - Если мероприятие помечено is_incomplete=True, к ответу добавляется
+    предупреждение ⚠️ о необходимости уточнить детали по ссылке.
 """
 
 from __future__ import annotations
@@ -11,7 +18,7 @@ import numpy as np
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
-from database import get_events_by_directions
+from database import get_all_events_for_rag
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
 GROQ_MODEL = "llama3-70b-8192"
@@ -45,7 +52,15 @@ def build_faiss_index(events: list[dict]):
     
     texts = []
     for e in events:
-        t = f"Название: {e['title']}. Дата: {e['event_date']}. Описание: {e.get('description','')}."
+        # Строим поисковый текст с учётом новых полей category и is_incomplete
+        category_part = f" Категория: {e['category']}." if e.get("category") else ""
+        date_part = e.get("event_date") or "дата уточняется"
+        t = (
+            f"Название: {e['title']}."
+            f" Дата: {date_part}."
+            f"{category_part}"
+            f" Описание: {e.get('description', '')}."
+        )
         texts.append(t)
         
     emb = get_embedder()
@@ -56,6 +71,25 @@ def build_faiss_index(events: list[dict]):
     index.add(vectors)
     return index, texts
 
+def _format_event_for_context(ev: dict) -> str:
+    """Форматирует одно мероприятие для подачи в промпт LLM.
+    
+    Добавляет пометку ⚠️, если мероприятие неполное (is_incomplete=True).
+    """
+    date_str = ev.get("event_date") or "не указана"
+    category_str = ev.get("category") or ev.get("direction") or "—"
+    incomplete_flag = ev.get("is_incomplete") or ev.get("is_incomplete") == 1
+
+    line = (
+        f"- **{ev['title']}**\n"
+        f"  Дата: {date_str} | Категория: {category_str}\n"
+        f"  Ссылка: {ev['url']}\n"
+        f"  {ev.get('description', '')}"
+    )
+    if incomplete_flag:
+        line += "\n  ⚠️ *Данные неполные — точную дату и условия уточните по ссылке*"
+    return line
+
 def get_recommendations(role: str, directions: list[str], today: str) -> dict:
     """
     Возвращает словарь:
@@ -63,43 +97,46 @@ def get_recommendations(role: str, directions: list[str], today: str) -> dict:
        "answer": "Ответ LLM",
        "retrieved_context": ["сырой текст из БД", ...]
     }
-    """
-    if not directions:
-        return {"answer": "Не указаны теги для поиска.", "retrieved_context": []}
 
-    events = get_events_by_directions(directions, today)
+    Изменение (ADR-0003): directions больше не используются для SQL-фильтрации.
+    Параметр сохранен в сигнатуре для совместимости с app.py и используется
+    только для формирования текста поискового запроса к FAISS.
+    """
+    # Берем ВСЕ мероприятия — FAISS сам найдет релевантные
+    events = get_all_events_for_rag()
     
     if not events:
-        return {"answer": "Подходящих мероприятий не найдено в базе.", "retrieved_context": []}
+        return {"answer": "В базе данных пока нет мероприятий. Запустите Авто-Сбор в режиме администратора.", "retrieved_context": []}
 
-    # 1. Поиск (Retrieval)
+    # 1. Поиск (Retrieval) — только векторная близость
     index, texts = build_faiss_index(events)
     if not index:
         return {"answer": "Ошибка построения индекса.", "retrieved_context": []}
-        
-    query = f"Лучшие мероприятия для профиля: {role}, интересы: {', '.join(directions)}"
+
+    # Формируем поисковый запрос, используя role и directions как подсказки
+    directions_hint = f", интересы: {', '.join(directions)}" if directions else ""
+    query = f"Мероприятия для профиля: {role}{directions_hint}"
     q_vec = get_embedder().encode([query], convert_to_numpy=True)
     
-    k = min(3, len(events))
+    k = min(5, len(events))
     distances, indices = index.search(q_vec, k)
     
     context_texts = []
     for idx in indices[0]:
         if idx < len(events):
             ev = events[idx]
-            context_texts.append(
-                f"- {ev['title']} ({ev['event_date']})\n  Ссылка: {ev['url']}\n  {ev.get('description','')}"
-            )
+            context_texts.append(_format_event_for_context(ev))
             
     context_block = "\n\n".join(context_texts)
     
     # 2. Генерация (Augmented Generation)
     system_prompt = (
-        "Ты — AI-рекомендательная система EduRec. "
-        "Пользователь хочет получить подборку мероприятий.\n"
-        "ВАЖНО: Ты ДОЛЖЕН использовать ТОЛЬКО следующий контекст (шпаргалку) для ответа. "
-        "Не выдумывай ссылки и даты, бери их строго из контекста.\n\n"
-        f"--- КОНТЕКСТ ИЗ FAISS БД ---\n{context_block}\n------------------------\n\n"
+        "Ты — AI-рекомендательная система EduRec для советников по воспитательной работе. "
+        "Пользователь хочет получить подборку подходящих мероприятий.\n"
+        "ВАЖНО: Ты ДОЛЖЕН использовать ТОЛЬКО следующий контекст для ответа. "
+        "Не выдумывай ссылки и даты, бери их строго из контекста.\n"
+        "Если у мероприятия стоит пометка ⚠️ — обязательно упомяни в ответе, что детали нужно уточнить по ссылке.\n\n"
+        f"--- КОНТЕКСТ ИЗ БАЗЫ ДАННЫХ ---\n{context_block}\n------------------------\n\n"
         "Напиши дружелюбный ответ, перечисли найденные мероприятия, укажи прямые ссылки и объясни, почему они подходят."
     )
     

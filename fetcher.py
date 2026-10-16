@@ -41,9 +41,16 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Константы ──────────────────────────────────────────────────────────────────
-GROQ_MODEL_FAST = "llama-3.1-8b-instant"       # Scout-валидация, Аудит
-GROQ_MODEL_SMART = "llama-3.3-70b-versatile"   # Harvester (главный экстрактор — актуальная LLaMA 3.3 70B)
+# llama-3.1-8b-instant — флагманская бесплатная модель Groq.
+# Используем одну модель для всего: она стабильна, не будет убрана,
+# лимит 30 000 TPM (в 5× больше, чем у 70B), и для JSON-извлечения по шаблону
+# 8B работает ничуть не хуже.
+GROQ_MODEL = "llama-3.1-8b-instant"
 JINA_BASE = "https://r.jina.ai/"
+
+# Псевдонимы — чтобы не переписывать места где используются FAST/SMART
+GROQ_MODEL_FAST = GROQ_MODEL
+GROQ_MODEL_SMART = GROQ_MODEL
 
 # Браузерные заголовки для прямых HTTP-запросов к гос. ресурсам.
 # Без них многие .gov.ru и edu.ru возвращают 403 или пустую страницу.
@@ -376,21 +383,23 @@ def audit_sources(log: Callable[[str], None] = _noop) -> dict:
 # HARVESTER — Умный Сборщик Events из Golden Seeds + Trusted Sources
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Промпт возвращает JSON-объект, а не голый массив — это требование response_format=json_object.
+# Groq гарантирует валидный JSON только для объектов {}, а не массивов [].
 _HARVEST_PROMPT = f"""Ты — ИИ-экстрактор образовательных мероприятий для советников по воспитательной работе в школах РФ.
 Тебе дан текст страницы сайта (markdown). Извлеки ВСЕ государственные образовательные мероприятия.
+Верни ответ строго в формате JSON.
 
 ПРАВИЛА ФИЛЬТРАЦИИ:
 1. Мероприятие должно быть государственным, патриотическим, добровольческим или официальным (не коммерческим).
 2. Если дата не указана явно — НЕ ОТБРАСЫВАЙ мероприятие. Укажи event_date как null.
 3. Если целевая аудитория не указана — укажи target_audience как null. Мероприятие всё равно сохраняй.
-4. Отсекай только: платные коммерческие курсы, рекламу.
-5. Если видишь сомнительное мероприятие — добавь его с пометкой в description: "Требует уточнения".
+4. Отсекай только: платные коммерческие курсы и рекламу.
 
 Классифицируй каждое мероприятие по одной из категорий таксономии ФОП ДО:
 {json.dumps(TAXONOMY, ensure_ascii=False)}
 
-Верни JSON-массив (может быть пустым []):
-[
+Верни строго JSON-объект в формате:
+{{"events": [
   {{
     "title": "Точное название мероприятия",
     "event_date": "Дата или период, либо null если не указана",
@@ -398,31 +407,40 @@ _HARVEST_PROMPT = f"""Ты — ИИ-экстрактор образовател�
     "target_audience": "Для кого предназначено, либо null",
     "description": "1-2 предложения о мероприятии и его пользе для школы"
   }}
-]
-Ничего кроме JSON-массива."""
+]}}
+Если мероприятий не найдено — верни {{"events": []}}. Ничего кроме JSON."""
 
 
 def _extract_events_via_llm(source_url: str, content: str, client: OpenAI,
                               log: Callable[[str], None] = _noop) -> list[dict]:
-    """Извлекает Events из текста страницы через Groq LLaMA-3-70B."""
+    """Извлекает Events из текста страницы через Groq.
+
+    Изменения (защита от подводных камней Groq):
+    - Ограничение входного текста до 6000 символов → не упираемся в TPM.
+    - response_format=json_object → Groq гарантирует валидный JSON.
+    - Ответ обёрнут в {"events":[...]} → надёжный парсинг без хрупкого поиска "[".
+    """
+    # Ограничиваем текст: 6000 символов достаточно для анонсов страницы
+    trimmed_content = content[:6000]
+
     try:
         resp = client.chat.completions.create(
             model=GROQ_MODEL_SMART,
             messages=[
                 {"role": "system", "content": _HARVEST_PROMPT},
-                {"role": "user", "content": f"URL источника: {source_url}\n\nТекст страницы:\n{content}"},
+                {"role": "user", "content": f"URL источника: {source_url}\n\nТекст страницы:\n{trimmed_content}"},
             ],
             temperature=0.1,
+            response_format={"type": "json_object"},
         )
         raw = resp.choices[0].message.content.strip()
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start == -1 or end == 0:
-            log(f"  ⚠️ LLM вернула пустой список для {source_url}")
-            return []
-        extracted = json.loads(raw[start:end])
+        data = json.loads(raw)
+        extracted = data.get("events", [])
         log(f"  ✅ LLM извлекла {len(extracted)} мероприятий")
         return extracted
+    except json.JSONDecodeError as e:
+        log(f"  ⚠️ LLM вернула невалидный JSON: {e}")
+        return []
     except Exception as e:
         log(f"  ❌ Ошибка LLM-извлечения: {e}")
         return []

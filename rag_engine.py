@@ -21,7 +21,8 @@ from sentence_transformers import SentenceTransformer
 from database import get_all_events_for_rag
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Та же стабильная бесплатная модель что и в fetcher.py
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 _embedder = None
 

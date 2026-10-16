@@ -21,7 +21,7 @@ from sentence_transformers import SentenceTransformer
 from database import get_all_events_for_rag
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
-GROQ_MODEL = "llama3-70b-8192"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 _embedder = None
 

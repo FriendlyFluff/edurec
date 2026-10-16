@@ -41,8 +41,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Константы ──────────────────────────────────────────────────────────────────
-GROQ_MODEL_FAST = "llama3-8b-8192"     # Scout-валидация, Аудит (не требует глубокого анализа)
-GROQ_MODEL_SMART = "llama3-70b-8192"   # Harvester (главный экстрактор — нужна точность)
+GROQ_MODEL_FAST = "llama-3.1-8b-instant"       # Scout-валидация, Аудит
+GROQ_MODEL_SMART = "llama-3.3-70b-versatile"   # Harvester (главный экстрактор — актуальная LLaMA 3.3 70B)
 JINA_BASE = "https://r.jina.ai/"
 
 # Браузерные заголовки для прямых HTTP-запросов к гос. ресурсам.

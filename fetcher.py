@@ -138,28 +138,29 @@ def get_best_groq_model(client: OpenAI, log: Callable[[str], None] = _noop) -> s
     if _cached_model:
         return _cached_model
 
+    # Приоритет: быстрая 20B для извлечения JSON, затем остальные
     preferred_candidates = [
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+        "openai/gpt-oss-120b",
         "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
         "llama-3.1-8b-instant",
         "gemma2-9b-it",
         "mixtral-8x7b-32768",
-        "llama3-70b-8192",
-        "llama3-8b-8192",
     ]
 
     try:
         models_data = client.models.list()
         available_ids = [m.id for m in models_data.data]
-        log(f"  🔍 Доступные модели Groq: {', '.join(available_ids[:5])}...")
+        log(f"  🔍 Доступные модели Groq: {', '.join(available_ids)}")
 
         for cand in preferred_candidates:
             if cand in available_ids:
                 _cached_model = cand
-                log(f"  🎯 Выбрана оптимальная модель: {_cached_model}")
+                log(f"  🎯 Выбрана модель: {_cached_model}")
                 return _cached_model
 
-        # Если ни один кандидат не совпал, берем первую доступную не-whisper
+        # Если ни один кандидат не совпал, берем первую доступную не-whisper/guard
         for mid in available_ids:
             if "whisper" not in mid and "guard" not in mid:
                 _cached_model = mid
@@ -168,8 +169,9 @@ def get_best_groq_model(client: OpenAI, log: Callable[[str], None] = _noop) -> s
     except Exception as e:
         log(f"  ⚠️ Не удалось запросить список моделей: {e}. Используем fallback.")
 
-    _cached_model = "llama-3.1-8b-instant"
+    _cached_model = "openai/gpt-oss-20b"
     return _cached_model
+
 
 
 def _tavily_key() -> str:

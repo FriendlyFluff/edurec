@@ -49,11 +49,11 @@ def get_best_rag_model(client: OpenAI) -> str:
         return _cached_rag_model
 
     candidates = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
         "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
         "llama-3.1-8b-instant",
-        "gemma2-9b-it",
-        "mixtral-8x7b-32768",
     ]
     try:
         available = [m.id for m in client.models.list().data]
@@ -67,8 +67,9 @@ def get_best_rag_model(client: OpenAI) -> str:
                 return _cached_rag_model
     except Exception:
         pass
-    _cached_rag_model = "llama-3.1-8b-instant"
+    _cached_rag_model = "openai/gpt-oss-120b"
     return _cached_rag_model
+
 
 
 def get_groq_client() -> OpenAI:

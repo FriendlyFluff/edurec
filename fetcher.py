@@ -41,6 +41,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Константы ──────────────────────────────────────────────────────────────────
+JINA_BASE = "https://r.jina.ai/"
 
 # Браузерные заголовки для прямых HTTP-запросов к гос. ресурсам.
 # Без них многие .gov.ru и edu.ru возвращают 403 или пустую страницу.
@@ -200,7 +201,7 @@ def _fetch_opengraph_fallback(url: str, log: Callable[[str], None] = _noop) -> s
     в соцсетях — они есть даже на SPA (Next.js/Vue).
     """
     try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15, verify=False)
         html = resp.text
         title_m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', html)
         desc_m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)', html)
@@ -534,7 +535,7 @@ def run_harvester(log: Callable[[str], None] = _noop) -> int:
 
     for url in all_urls:
         log(f"\n🌐 Читаю источник: {url}")
-        time.sleep(1.5)  # Вежливая пауза между источниками
+        time.sleep(3.0)  # Вежливая пауза между источниками
 
         # Шаг 1: Читаем главную страницу
         main_content = _fetch_via_jina(url, log)

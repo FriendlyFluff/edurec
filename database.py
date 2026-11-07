@@ -143,7 +143,7 @@ def save_source(url: str) -> int | None:
     else:
         with _sqlite_conn() as conn:
             existing = conn.execute(
-                "SELECT id FROM trusted_sources WHERE url=?", (url,)
+                "SELECT id FROM trusted_sources WHERE url=?", (url.strip(),)
             ).fetchone()
             if existing:
                 return existing["id"]
@@ -194,7 +194,7 @@ def save_event(title: str, url: str, event_date: str,
     if USE_SUPABASE:
         supa = _supa()
         # Проверяем дубликат
-        existing = supa.table("events").select("event_id").eq("url", url).execute()
+        existing = supa.table("events").select("event_id").eq("title", title.strip()).execute()
         if existing.data:
             return existing.data[0]["event_id"]
         res = supa.table("events").insert({
@@ -212,7 +212,7 @@ def save_event(title: str, url: str, event_date: str,
     else:
         with _sqlite_conn() as conn:
             existing = conn.execute(
-                "SELECT event_id FROM events WHERE url=?", (url,)
+                "SELECT event_id FROM events WHERE title=?", (url.strip(),)
             ).fetchone()
             if existing:
                 return existing["event_id"]

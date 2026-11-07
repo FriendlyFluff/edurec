@@ -41,16 +41,6 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Константы ──────────────────────────────────────────────────────────────────
-# llama-3.1-8b-instant — флагманская бесплатная модель Groq.
-# Используем одну модель для всего: она стабильна, не будет убрана,
-# лимит 30 000 TPM (в 5× больше, чем у 70B), и для JSON-извлечения по шаблону
-# 8B работает ничуть не хуже.
-GROQ_MODEL = "llama-3.1-8b-instant"
-JINA_BASE = "https://r.jina.ai/"
-
-# Псевдонимы — чтобы не переписывать места где используются FAST/SMART
-GROQ_MODEL_FAST = GROQ_MODEL
-GROQ_MODEL_SMART = GROQ_MODEL
 
 # Браузерные заголовки для прямых HTTP-запросов к гос. ресурсам.
 # Без них многие .gov.ru и edu.ru возвращают 403 или пустую страницу.
@@ -227,11 +217,11 @@ def _fetch_opengraph_fallback(url: str, log: Callable[[str], None] = _noop) -> s
 
 # ── Smart Crawl ────────────────────────────────────────────────────────────────
 
-def _smart_crawl(base_url: str, main_content: str, log: Callable[[str], None] = _noop) -> str:
+def _smart_crawl(base_url: str, main_content: str, log: Callable[[str], None] = _noop) -> tuple[str, str]:
     """Ищет в тексте главной страницы ссылку на раздел мероприятий.
 
     Делает ровно один переход вглубь (Smart Crawl, глубина = 1).
-    Возвращает текст целевой страницы, либо исходный main_content.
+    Возвращает кортеж (текст страницы, актуальный url).
     """
     # Ищем URL в тексте Jina (он обычно приводит ссылки в формате [текст](url))
     link_pattern = re.compile(r'\[([^\]]+)\]\((https?://[^\)]+)\)')
@@ -250,11 +240,11 @@ def _smart_crawl(base_url: str, main_content: str, log: Callable[[str], None] = 
             deep_content = _fetch_via_jina(link_url, log)
             if deep_content and len(deep_content) > len(main_content) * 0.3:
                 log(f"  ✅ Smart Crawl успешен. Получено {len(deep_content)} символов.")
-                return deep_content
+                return deep_content, link_url
             log(f"  ⚠️ Smart Crawl вернул мало контента, использую главную страницу.")
             break
 
-    return main_content
+    return main_content, base_url
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -301,7 +291,7 @@ def _validate_source_via_llm(url: str, snippet: str, client: OpenAI,
                                log: Callable[[str], None] = _noop) -> bool:
     try:
         resp = client.chat.completions.create(
-            model=GROQ_MODEL_FAST,
+            model=get_best_groq_model(client, log),
             messages=[
                 {"role": "system", "content": _SCOUT_VALIDATION_PROMPT},
                 {"role": "user", "content": f"URL: {url}\nОписание: {snippet[:500]}"},
@@ -371,7 +361,7 @@ def _audit_source_via_llm(url: str, content: str, client: OpenAI,
                             log: Callable[[str], None] = _noop) -> str:
     try:
         resp = client.chat.completions.create(
-            model=GROQ_MODEL_FAST,
+            model=get_best_groq_model(client, log),
             messages=[
                 {"role": "system", "content": _AUDIT_PROMPT},
                 {"role": "user", "content": f"URL: {url}\n\nСодержимое:\n{content[:3000]}"},
@@ -449,6 +439,7 @@ _HARVEST_PROMPT = f"""Ты — ИИ-экстрактор образовател�
 {{"events": [
   {{
     "title": "Точное название мероприятия",
+    "url": "Прямая ссылка на мероприятие (если есть в тексте), иначе null",
     "event_date": "Дата или период, либо null если не указана",
     "category": "Одна из категорий таксономии ФОП ДО",
     "target_audience": "Для кого предназначено, либо null",
@@ -554,11 +545,11 @@ def run_harvester(log: Callable[[str], None] = _noop) -> int:
         log(f"  📄 Главная страница: {len(main_content)} символов")
 
         # Шаг 2: Smart Crawl — ищем раздел мероприятий внутри сайта
-        content = _smart_crawl(url, main_content, log)
+        content, target_url = _smart_crawl(url, main_content, log)
 
         # Шаг 3: LLM извлекает мероприятия
-        log(f"  🤖 Передаю текст в LLaMA-3-70B для извлечения...")
-        events = _extract_events_via_llm(url, content, client, log)
+        log(f"  🤖 Передаю текст в Groq LLM для извлечения...")
+        events = _extract_events_via_llm(target_url, content, client, log)
 
         if not events:
             log(f"  ℹ️ Мероприятий на странице не найдено (возможно, не сезон).")
@@ -585,9 +576,10 @@ def run_harvester(log: Callable[[str], None] = _noop) -> int:
             incomplete_mark = " (⚠️ дата уточняется)" if not event_date else ""
             log(f"  [+] Сохраняю: {title[:60]}{incomplete_mark}")
 
+            ev_url = ev.get("url") or target_url
             save_event(
                 title=title,
-                url=url,
+                url=ev_url,
                 event_date=event_date or "",
                 direction=category,    # direction = category для обратной совместимости
                 category=category,
